@@ -3,16 +3,20 @@ import sqlite3
 from flask import Flask, render_template, request, redirect
 from werkzeug.utils import secure_filename
 from datetime import datetime
+from flask import session
 import PyPDF2
 import docx
 
+
 app = Flask(__name__)
+app.secret_key = "secret123"
 
 # ✅ Absolute path fix (IMPORTANT for Render)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 DB_PATH = os.path.join(BASE_DIR, 'database.db')
+print("Using DB at:", DB_PATH)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
@@ -23,18 +27,30 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
+    # Users table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT
+        )
+    ''')
+
+    # Files table (add user_id)
     c.execute('''
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             filename TEXT,
             filepath TEXT,
             category TEXT,
-            upload_date TEXT
+            upload_date TEXT,
+            user_id INTEGER
         )
     ''')
+
     conn.commit()
     conn.close()
-
 init_db()
 
 # ---------------- AI CLASSIFICATION ----------------
@@ -84,6 +100,11 @@ def index():
 
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
+
+    # ✅ ADD THIS (login protection)
+    if 'user_id' not in session:
+        return redirect('/login')
+
     if request.method == 'POST':
         file = request.files['file']
 
@@ -91,15 +112,22 @@ def upload():
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
 
+            # ✅ FIXED TYPO
             file.save(filepath)
 
             text = extract_text(filepath)
             category = classify_text(text, filename)
 
+            # ✅ GET USER ID
+            user_id = session['user_id']
+
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
-            c.execute("INSERT INTO files (filename, filepath, category, upload_date) VALUES (?, ?, ?, ?)",
-                      (filename, filepath, category, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+            # ✅ UPDATED QUERY (added user_id)
+            c.execute("INSERT INTO files (filename, filepath, category, upload_date, user_id) VALUES (?, ?, ?, ?, ?)",
+                      (filename, filepath, category, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
+
             conn.commit()
             conn.close()
 
@@ -110,13 +138,73 @@ def upload():
 
 @app.route('/dashboard')
 def dashboard():
+
+    # ✅ LOGIN PROTECTION
+    if 'user_id' not in session:
+        return redirect('/login')
+
+    user_id = session['user_id']
+
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT * FROM files")
+
+    # ✅ SHOW ONLY CURRENT USER FILES
+    c.execute("SELECT * FROM files WHERE user_id=?", (user_id,))
     files = c.fetchall()
+
     conn.close()
 
     return render_template('dashboard.html', files=files)
+
+
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+
+        try:
+            c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+            conn.commit()
+        except:
+            return "Username already exists!"
+
+        conn.close()
+        return redirect('/login')
+
+    return render_template('signup.html')
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+
+        c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+        user = c.fetchone()
+        conn.close()
+
+        if user:
+            session['user_id'] = user[0]
+            return redirect('/dashboard')
+        else:
+            return "Invalid credentials!"
+
+    return render_template('login.html')
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
 
 
 if __name__ == '__main__':
